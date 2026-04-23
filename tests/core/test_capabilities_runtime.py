@@ -27,17 +27,11 @@ def _install_module(monkeypatch: pytest.MonkeyPatch, fullname: str, **attrs: Any
             pkg = types.ModuleType(pkg_name)
             pkg.__path__ = []  # type: ignore[attr-defined]
             monkeypatch.setitem(sys.modules, pkg_name, pkg)
-            if idx > 1:
-                parent = sys.modules[".".join(parts[: idx - 1])]
-                setattr(parent, parts[idx - 1], pkg)
 
     module = types.ModuleType(fullname)
     for key, value in attrs.items():
         setattr(module, key, value)
     monkeypatch.setitem(sys.modules, fullname, module)
-    if len(parts) > 1:
-        parent = sys.modules[".".join(parts[:-1])]
-        setattr(parent, parts[-1], module)
     return module
 
 
