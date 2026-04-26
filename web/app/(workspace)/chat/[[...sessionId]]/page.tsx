@@ -25,9 +25,20 @@ import type { SelectedHistorySession } from "@/components/chat/HistorySessionPic
 import type { SelectedQuestionEntry } from "@/components/chat/QuestionBankPicker";
 import ChatComposer from "@/components/chat/home/ChatComposer";
 import { ChatMessageList } from "@/components/chat/home/ChatMessages";
-import { useUnifiedChat, type MessageRequestSnapshot } from "@/context/UnifiedChatContext";
+import {
+  useUnifiedChat,
+  type MessageRequestSnapshot,
+} from "@/context/UnifiedChatContext";
 import type { StreamEvent } from "@/lib/unified-ws";
-import { extractBase64FromDataUrl, readFileAsDataUrl } from "@/lib/file-attachments";
+import {
+  extractBase64FromDataUrl,
+  readFileAsDataUrl,
+} from "@/lib/file-attachments";
+import {
+  classifyFile,
+  MAX_ATTACHMENT_BYTES,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+} from "@/lib/doc-attachments";
 import { useChatAutoScroll } from "@/hooks/useChatAutoScroll";
 import { useMeasuredHeight } from "@/hooks/useMeasuredHeight";
 import {
@@ -61,18 +72,30 @@ import {
 import { listKnowledgeBases } from "@/lib/knowledge-api";
 import { listSkills, type SkillInfo } from "@/lib/skills-api";
 
-const NotebookRecordPicker = dynamic(() => import("@/components/notebook/NotebookRecordPicker"), {
-  ssr: false,
-});
-const HistorySessionPicker = dynamic(() => import("@/components/chat/HistorySessionPicker"), {
-  ssr: false,
-});
-const QuestionBankPicker = dynamic(() => import("@/components/chat/QuestionBankPicker"), {
-  ssr: false,
-});
-const SaveToNotebookModal = dynamic(() => import("@/components/notebook/SaveToNotebookModal"), {
-  ssr: false,
-});
+const NotebookRecordPicker = dynamic(
+  () => import("@/components/notebook/NotebookRecordPicker"),
+  {
+    ssr: false,
+  },
+);
+const HistorySessionPicker = dynamic(
+  () => import("@/components/chat/HistorySessionPicker"),
+  {
+    ssr: false,
+  },
+);
+const QuestionBankPicker = dynamic(
+  () => import("@/components/chat/QuestionBankPicker"),
+  {
+    ssr: false,
+  },
+);
+const SaveToNotebookModal = dynamic(
+  () => import("@/components/notebook/SaveToNotebookModal"),
+  {
+    ssr: false,
+  },
+);
 
 /* ------------------------------------------------------------------ */
 /*  Type & data definitions                                           */
@@ -128,7 +151,14 @@ const CAPABILITIES: CapabilityDef[] = [
     label: "Chat",
     description: "Flexible conversation with any tool",
     icon: MessageSquare,
-    allowedTools: ["brainstorm", "rag", "web_search", "code_execution", "reason", "paper_search"],
+    allowedTools: [
+      "brainstorm",
+      "rag",
+      "web_search",
+      "code_execution",
+      "reason",
+      "paper_search",
+    ],
     defaultTools: [],
   },
   {
@@ -183,6 +213,8 @@ interface PendingAttachment {
   filename: string;
   base64?: string;
   previewUrl?: string;
+  size?: number;
+  mimeType?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -216,19 +248,27 @@ export default function ChatPage() {
   } = useUnifiedChat();
 
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
-  const [capabilityConfigs, setCapabilityConfigs] = useState<CapabilityPlaygroundConfigMap>({});
+  const [capabilityConfigs, setCapabilityConfigs] =
+    useState<CapabilityPlaygroundConfigMap>({});
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [capMenuOpen, setCapMenuOpen] = useState(false);
-  const [quizConfig, setQuizConfig] = useState<DeepQuestionFormConfig>({ ...DEFAULT_QUIZ_CONFIG });
-  const [quizPdf, setQuizPdf] = useState<File | null>(null);
-  const [mathAnimatorConfig, setMathAnimatorConfig] = useState<MathAnimatorFormConfig>({
-    ...DEFAULT_MATH_ANIMATOR_CONFIG,
+  const [quizConfig, setQuizConfig] = useState<DeepQuestionFormConfig>({
+    ...DEFAULT_QUIZ_CONFIG,
   });
+  const [quizPdf, setQuizPdf] = useState<File | null>(null);
+  const [mathAnimatorConfig, setMathAnimatorConfig] =
+    useState<MathAnimatorFormConfig>({
+      ...DEFAULT_MATH_ANIMATOR_CONFIG,
+    });
   const [visualizeConfig, setVisualizeConfig] = useState<VisualizeFormConfig>({
     ...DEFAULT_VISUALIZE_CONFIG,
   });
-  const [researchConfig, setResearchConfig] = useState<DeepResearchFormConfig>(createEmptyResearchConfig());
+  const [researchConfig, setResearchConfig] = useState<DeepResearchFormConfig>(
+    createEmptyResearchConfig(),
+  );
   // Unified collapse state for the capability-specific config panel
   // (Quiz / Math Animator / Visualize / Deep Research). Default collapsed so
   // a fresh Chat / Deep Solve session has the shortest possible composer.
@@ -240,12 +280,18 @@ export default function ChatPage() {
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
   const [refMenuOpen, setRefMenuOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
-  const [selectedNotebookRecords, setSelectedNotebookRecords] = useState<SelectedRecord[]>([]);
-  const [selectedHistorySessions, setSelectedHistorySessions] = useState<SelectedHistorySession[]>([]);
-  const [selectedQuestionEntries, setSelectedQuestionEntries] = useState<SelectedQuestionEntry[]>([]);
+  const [selectedNotebookRecords, setSelectedNotebookRecords] = useState<
+    SelectedRecord[]
+  >([]);
+  const [selectedHistorySessions, setSelectedHistorySessions] = useState<
+    SelectedHistorySession[]
+  >([]);
+  const [selectedQuestionEntries, setSelectedQuestionEntries] = useState<
+    SelectedQuestionEntry[]
+  >([]);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  const [skillsAutoMode, setSkillsAutoMode] = useState(true);
+  const [skillsAutoMode, setSkillsAutoMode] = useState(false);
   const dragCounter = useRef(0);
   const capMenuRef = useRef<HTMLDivElement>(null);
   const capBtnRef = useRef<HTMLButtonElement>(null);
@@ -257,15 +303,24 @@ export default function ChatPage() {
   const skillBtnRef = useRef<HTMLButtonElement>(null);
   const initialLoadRef = useRef(false);
 
-  const activeCap = useMemo(() => getCapability(state.activeCapability), [state.activeCapability]);
+  const activeCap = useMemo(
+    () => getCapability(state.activeCapability),
+    [state.activeCapability],
+  );
   const isQuizMode = activeCap.value === "deep_question";
   const isMathAnimatorMode = activeCap.value === "math_animator";
   const isVisualizeMode = activeCap.value === "visualize";
   const isResearchMode = activeCap.value === "deep_research";
-  const selectedTools = useMemo(() => new Set(state.enabledTools), [state.enabledTools]);
-  const ragActive = isResearchMode ? researchConfig.sources.includes("kb") : selectedTools.has("rag");
+  const selectedTools = useMemo(
+    () => new Set(state.enabledTools),
+    [state.enabledTools],
+  );
+  const ragActive = isResearchMode
+    ? researchConfig.sources.includes("kb")
+    : selectedTools.has("rag");
   const hasMessages = state.messages.length > 0;
-  const { ref: composerRef, height: composerHeight } = useMeasuredHeight<HTMLDivElement>();
+  const { ref: composerRef, height: composerHeight } =
+    useMeasuredHeight<HTMLDivElement>();
   const visibleTools = useMemo(
     () => ALL_TOOLS.filter((t) => activeCap.allowedTools.includes(t.name)),
     [activeCap.allowedTools],
@@ -281,10 +336,16 @@ export default function ChatPage() {
       if (existing) {
         existing.count += 1;
       } else {
-        groups.set(record.notebookId, { notebookName: record.notebookName, count: 1 });
+        groups.set(record.notebookId, {
+          notebookName: record.notebookName,
+          count: 1,
+        });
       }
     });
-    return Array.from(groups.entries()).map(([notebookId, value]) => ({ notebookId, ...value }));
+    return Array.from(groups.entries()).map(([notebookId, value]) => ({
+      notebookId,
+      ...value,
+    }));
   }, [selectedNotebookRecords]);
   const notebookReferencesPayload = useMemo(() => {
     const grouped = new Map<string, string[]>();
@@ -293,7 +354,10 @@ export default function ChatPage() {
       current.push(record.id);
       grouped.set(record.notebookId, current);
     });
-    return Array.from(grouped.entries()).map(([notebook_id, record_ids]) => ({ notebook_id, record_ids }));
+    return Array.from(grouped.entries()).map(([notebook_id, record_ids]) => ({
+      notebook_id,
+      record_ids,
+    }));
   }, [selectedNotebookRecords]);
   const historyReferencesPayload = useMemo(
     () => selectedHistorySessions.map((session) => session.sessionId),
@@ -315,7 +379,10 @@ export default function ChatPage() {
   const chatSavePayload = useMemo(() => {
     if (!state.messages.length) return null;
     const title =
-      state.messages.find((msg) => msg.role === "user")?.content.trim().slice(0, 80) || "Chat Session";
+      state.messages
+        .find((msg) => msg.role === "user")
+        ?.content.trim()
+        .slice(0, 80) || "Chat Session";
     return {
       recordType: "chat" as const,
       title,
@@ -349,12 +416,17 @@ export default function ChatPage() {
   });
   const copyAssistantMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
-    try { await navigator.clipboard.writeText(content); } catch (error) {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch (error) {
       console.error("Failed to copy assistant message:", error);
     }
   }, []);
   const handleAnswerNow = useCallback(
-    (snapshot?: MessageRequestSnapshot, assistantMsg?: { content: string; events?: StreamEvent[] }) => {
+    (
+      snapshot?: MessageRequestSnapshot,
+      assistantMsg?: { content: string; events?: StreamEvent[] },
+    ) => {
       if (!snapshot || !state.isStreaming) return;
       const answerNowEvents = (assistantMsg?.events ?? []).map((event) => ({
         type: event.type,
@@ -443,7 +515,9 @@ export default function ChatPage() {
           const def = list.find((k: KnowledgeBase) => k.is_default);
           setKBs([def?.name || list[0].name]);
         }
-      } catch { setKnowledgeBases([]); }
+      } catch {
+        setKnowledgeBases([]);
+      }
     })();
   }, [setKBs, state.knowledgeBases.length]);
 
@@ -459,7 +533,9 @@ export default function ChatPage() {
     const qt = p.getAll("tool");
     if (qc !== null) handleSelectCapability(qc || "");
     else if (qt.length) {
-      const valid = qt.filter((t): t is ToolName => ALL_TOOLS.some((d) => d.name === t));
+      const valid = qt.filter((t): t is ToolName =>
+        ALL_TOOLS.some((d) => d.name === t),
+      );
       if (valid.length) setTools(Array.from(new Set(valid)));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -468,10 +544,34 @@ export default function ChatPage() {
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (capMenuRef.current && !capMenuRef.current.contains(t) && capBtnRef.current && !capBtnRef.current.contains(t)) setCapMenuOpen(false);
-      if (toolMenuRef.current && !toolMenuRef.current.contains(t) && toolBtnRef.current && !toolBtnRef.current.contains(t)) setToolMenuOpen(false);
-      if (refMenuRef.current && !refMenuRef.current.contains(t) && refBtnRef.current && !refBtnRef.current.contains(t)) setRefMenuOpen(false);
-      if (skillMenuRef.current && !skillMenuRef.current.contains(t) && skillBtnRef.current && !skillBtnRef.current.contains(t)) setSkillMenuOpen(false);
+      if (
+        capMenuRef.current &&
+        !capMenuRef.current.contains(t) &&
+        capBtnRef.current &&
+        !capBtnRef.current.contains(t)
+      )
+        setCapMenuOpen(false);
+      if (
+        toolMenuRef.current &&
+        !toolMenuRef.current.contains(t) &&
+        toolBtnRef.current &&
+        !toolBtnRef.current.contains(t)
+      )
+        setToolMenuOpen(false);
+      if (
+        refMenuRef.current &&
+        !refMenuRef.current.contains(t) &&
+        refBtnRef.current &&
+        !refBtnRef.current.contains(t)
+      )
+        setRefMenuOpen(false);
+      if (
+        skillMenuRef.current &&
+        !skillMenuRef.current.contains(t) &&
+        skillBtnRef.current &&
+        !skillBtnRef.current.contains(t)
+      )
+        setSkillMenuOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -479,11 +579,13 @@ export default function ChatPage() {
 
   useEffect(() => {
     let cancelled = false;
-    listSkills().then((items) => {
-      if (!cancelled) setAvailableSkills(items);
-    }).catch(() => {
-      if (!cancelled) setAvailableSkills([]);
-    });
+    listSkills()
+      .then((items) => {
+        if (!cancelled) setAvailableSkills(items);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableSkills([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -491,7 +593,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     const allowed = new Set(visibleTools.map((tool) => tool.name));
-    const nextTools = state.enabledTools.filter((tool) => allowed.has(tool as ToolName));
+    const nextTools = state.enabledTools.filter((tool) =>
+      allowed.has(tool as ToolName),
+    );
     if (nextTools.length !== state.enabledTools.length) setTools(nextTools);
   }, [setTools, state.enabledTools, visibleTools]);
 
@@ -499,16 +603,22 @@ export default function ChatPage() {
 
   const handleSelectCapability = useCallback(
     (value: string) => {
-      const cap = CAPABILITIES.find((c) => c.value === value) ?? CAPABILITIES[0];
+      const cap =
+        CAPABILITIES.find((c) => c.value === value) ?? CAPABILITIES[0];
       const storageKey = cap.value || "chat";
-      const config = resolveCapabilityPlaygroundConfig(capabilityConfigs, storageKey, cap.allowedTools);
+      const config = resolveCapabilityPlaygroundConfig(
+        capabilityConfigs,
+        storageKey,
+        cap.allowedTools,
+      );
       setCapability(cap.value || null);
       setTools(
         config.enabledTools.length > 0 || capabilityConfigs[storageKey]
           ? [...config.enabledTools]
           : [...cap.defaultTools],
       );
-      if (config.enabledTools.includes("rag") && config.knowledgeBase) setKBs([config.knowledgeBase]);
+      if (config.enabledTools.includes("rag") && config.knowledgeBase)
+        setKBs([config.knowledgeBase]);
       // Default-expand the per-capability settings panel right after a
       // capability switch so users immediately see the form. Sending a
       // message later will auto-collapse it (see handleSend).
@@ -518,14 +628,17 @@ export default function ChatPage() {
     [capabilityConfigs, setCapability, setKBs, setTools],
   );
 
-  const toggleTool = useCallback((tool: string) => {
-    if (!activeCap.allowedTools.includes(tool as ToolName)) return;
-    if (selectedTools.has(tool)) {
-      setTools(state.enabledTools.filter((t) => t !== tool));
-    } else {
-      setTools([...state.enabledTools, tool]);
-    }
-  }, [activeCap.allowedTools, selectedTools, setTools, state.enabledTools]);
+  const toggleTool = useCallback(
+    (tool: string) => {
+      if (!activeCap.allowedTools.includes(tool as ToolName)) return;
+      if (selectedTools.has(tool)) {
+        setTools(state.enabledTools.filter((t) => t !== tool));
+      } else {
+        setTools([...state.enabledTools, tool]);
+      }
+    },
+    [activeCap.allowedTools, selectedTools, setTools, state.enabledTools],
+  );
 
   const toggleResearchSource = useCallback((source: ResearchSource) => {
     setResearchConfig((current) => ({
@@ -536,114 +649,266 @@ export default function ChatPage() {
     }));
   }, []);
 
-  const fileToAttachment = useCallback((f: File): Promise<PendingAttachment> =>
-    new Promise((resolve, reject) => {
-      readFileAsDataUrl(f)
-        .then((raw) => {
-          const isImage = f.type.startsWith("image/");
-          const b64 = extractBase64FromDataUrl(raw);
-          resolve({ type: isImage ? "image" : "file", filename: f.name, base64: b64, previewUrl: isImage ? raw : undefined });
-        })
-        .catch(reject);
-    }), []);
+  const fileToAttachment = useCallback(
+    (f: File): Promise<PendingAttachment> =>
+      new Promise((resolve, reject) => {
+        readFileAsDataUrl(f)
+          .then((raw) => {
+            const isImage = f.type.startsWith("image/");
+            const b64 = extractBase64FromDataUrl(raw);
+            resolve({
+              type: isImage ? "image" : "file",
+              filename: f.name,
+              base64: b64,
+              previewUrl: isImage ? raw : undefined,
+              size: f.size,
+              mimeType: f.type || undefined,
+            });
+          })
+          .catch(reject);
+      }),
+    [],
+  );
 
-  const handlePaste = useCallback(async (event: React.ClipboardEvent) => {
-    const items = Array.from(event.clipboardData.items);
-    const imageFiles = items.filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    if (!imageFiles.length) return;
-    event.preventDefault();
-    const next = await Promise.all(imageFiles.map(fileToAttachment));
-    setAttachments((prev) => [...prev, ...next]);
-  }, [fileToAttachment]);
+  const showAttachmentError = useCallback((message: string) => {
+    setAttachmentError(message);
+    if (attachmentErrorTimer.current) {
+      clearTimeout(attachmentErrorTimer.current);
+    }
+    attachmentErrorTimer.current = setTimeout(() => {
+      setAttachmentError(null);
+      attachmentErrorTimer.current = null;
+    }, 4000);
+  }, []);
+
+  const filterAndReportFiles = useCallback(
+    (files: File[]): File[] => {
+      let runningTotal = attachments.reduce((s, a) => s + (a.size ?? 0), 0);
+      const accepted: File[] = [];
+      const rejected: {
+        name: string;
+        reason: "unsupported" | "too_large" | "quota";
+      }[] = [];
+      for (const f of files) {
+        const kind = classifyFile(f);
+        if (!kind) {
+          rejected.push({ name: f.name, reason: "unsupported" });
+          continue;
+        }
+        if (f.size > MAX_ATTACHMENT_BYTES) {
+          rejected.push({ name: f.name, reason: "too_large" });
+          continue;
+        }
+        if (runningTotal + f.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+          rejected.push({ name: f.name, reason: "quota" });
+          break;
+        }
+        runningTotal += f.size;
+        accepted.push(f);
+      }
+      if (rejected.length) {
+        const first = rejected[0];
+        let msg: string;
+        if (first.reason === "too_large") {
+          msg = t("File too large: {{name}}", { name: first.name });
+        } else if (first.reason === "quota") {
+          msg = t("Too many files, skipped some");
+        } else {
+          msg = t("Unsupported file type: {{name}}", { name: first.name });
+        }
+        showAttachmentError(msg);
+      }
+      return accepted;
+    },
+    [attachments, showAttachmentError, t],
+  );
+
+  const handlePaste = useCallback(
+    async (event: React.ClipboardEvent) => {
+      const items = Array.from(event.clipboardData.items);
+      const files = items
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((f): f is File => f !== null);
+      const accepted = filterAndReportFiles(files);
+      if (!accepted.length) return;
+      event.preventDefault();
+      const next = await Promise.all(accepted.map(fileToAttachment));
+      setAttachments((prev) => [...prev, ...next]);
+    },
+    [fileToAttachment, filterAndReportFiles],
+  );
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     dragCounter.current += 1;
     if (e.dataTransfer.types.includes("Files")) setDragging(true);
   }, []);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     dragCounter.current -= 1;
     if (dragCounter.current === 0) setDragging(false);
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
   }, []);
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault(); e.stopPropagation();
-    setDragging(false);
-    dragCounter.current = 0;
-    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
-    if (!files.length) return;
-    const next = await Promise.all(files.map(fileToAttachment));
-    setAttachments((prev) => [...prev, ...next]);
-  }, [fileToAttachment]);
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragging(false);
+      dragCounter.current = 0;
+      const accepted = filterAndReportFiles(Array.from(e.dataTransfer.files));
+      if (!accepted.length) return;
+      const next = await Promise.all(accepted.map(fileToAttachment));
+      setAttachments((prev) => [...prev, ...next]);
+    },
+    [fileToAttachment, filterAndReportFiles],
+  );
 
-  const handleSend = useCallback(async (content: string) => {
-    if ((!content && !attachments.length && !selectedNotebookRecords.length && !selectedHistorySessions.length && !selectedQuestionEntries.length) || state.isStreaming) return;
+  const handleAddFiles = useCallback(
+    async (files: File[]) => {
+      const accepted = filterAndReportFiles(files);
+      if (!accepted.length) return;
+      const next = await Promise.all(accepted.map(fileToAttachment));
+      setAttachments((prev) => [...prev, ...next]);
+    },
+    [fileToAttachment, filterAndReportFiles],
+  );
 
-    let extraAttachments = attachments.map((a) => ({ type: a.type, filename: a.filename, base64: a.base64 }));
-    let config: Record<string, unknown> | undefined;
+  const handleSend = useCallback(
+    async (content: string) => {
+      if (
+        (!content &&
+          !attachments.length &&
+          !selectedNotebookRecords.length &&
+          !selectedHistorySessions.length &&
+          !selectedQuestionEntries.length) ||
+        state.isStreaming
+      )
+        return;
 
-    if (isQuizMode) {
-      config = buildQuizWSConfig(quizConfig);
-      if (quizConfig.mode === "mimic" && quizPdf) {
-        const b64 = extractBase64FromDataUrl(await readFileAsDataUrl(quizPdf));
-        extraAttachments = [...extraAttachments, { type: "pdf", filename: quizPdf.name, base64: b64 }];
+      let extraAttachments = attachments.map((a) => ({
+        type: a.type,
+        filename: a.filename,
+        base64: a.base64,
+        mime_type: a.mimeType,
+      }));
+      let config: Record<string, unknown> | undefined;
+
+      if (isQuizMode) {
+        config = buildQuizWSConfig(quizConfig);
+        if (quizConfig.mode === "mimic" && quizPdf) {
+          const b64 = extractBase64FromDataUrl(
+            await readFileAsDataUrl(quizPdf),
+          );
+          extraAttachments = [
+            ...extraAttachments,
+            {
+              type: "pdf",
+              filename: quizPdf.name,
+              base64: b64,
+              mime_type: "application/pdf",
+            },
+          ];
+        }
       }
-    }
-    if (isMathAnimatorMode) config = buildMathAnimatorWSConfig(mathAnimatorConfig);
-    if (isVisualizeMode) config = buildVisualizeWSConfig(visualizeConfig);
-    if (isResearchMode) config = buildResearchWSConfig(researchConfig);
+      if (isMathAnimatorMode)
+        config = buildMathAnimatorWSConfig(mathAnimatorConfig);
+      if (isVisualizeMode) config = buildVisualizeWSConfig(visualizeConfig);
+      if (isResearchMode) config = buildResearchWSConfig(researchConfig);
 
-    const isChatMode = !state.activeCapability;
-    const skillsPayload = isChatMode
-      ? skillsAutoMode
-        ? ["auto"]
-        : selectedSkills
-      : undefined;
-    sendMessage(
-      content ||
-        (selectedNotebookRecords.length ||
-        selectedHistorySessions.length ||
-        selectedQuestionEntries.length
-          ? "Please use the selected context to help with this request."
-          : "") ||
-        (isMathAnimatorMode
-          ? attachments.some((a) => a.type === "image") ? "Generate a math animation from the attached reference image(s)." : ""
-          : attachments.some((a) => a.type === "image") ? "Please analyze the attached image(s)." : ""),
-      extraAttachments,
-      config,
-      notebookReferencesPayload,
+      const isChatMode = !state.activeCapability;
+      const skillsPayload = isChatMode
+        ? skillsAutoMode
+          ? ["auto"]
+          : selectedSkills
+        : undefined;
+      sendMessage(
+        content ||
+          (selectedNotebookRecords.length ||
+          selectedHistorySessions.length ||
+          selectedQuestionEntries.length
+            ? "Please use the selected context to help with this request."
+            : "") ||
+          (isMathAnimatorMode
+            ? attachments.some((a) => a.type === "image")
+              ? "Generate a math animation from the attached reference image(s)."
+              : ""
+            : attachments.some((a) => a.type === "image")
+              ? "Please analyze the attached image(s)."
+              : ""),
+        extraAttachments,
+        config,
+        notebookReferencesPayload,
+        historyReferencesPayload,
+        undefined,
+        questionNotebookReferencesPayload,
+        skillsPayload,
+      );
+      shouldAutoScrollRef.current = true;
+      // Auto-collapse the per-capability settings panel after sending so the
+      // composer stays compact during conversation.
+      setPanelCollapsed(true);
+      setAttachments([]);
+      setSelectedNotebookRecords([]);
+      setSelectedHistorySessions([]);
+      setSelectedQuestionEntries([]);
+    },
+    [
+      attachments,
       historyReferencesPayload,
-      undefined,
+      isMathAnimatorMode,
+      isQuizMode,
+      isResearchMode,
+      isVisualizeMode,
+      mathAnimatorConfig,
+      notebookReferencesPayload,
       questionNotebookReferencesPayload,
-      skillsPayload,
-    );
-    shouldAutoScrollRef.current = true;
-    // Auto-collapse the per-capability settings panel after sending so the
-    // composer stays compact during conversation.
-    setPanelCollapsed(true);
-    setAttachments([]);
-    setSelectedNotebookRecords([]);
-    setSelectedHistorySessions([]);
-    setSelectedQuestionEntries([]);
-  }, [attachments, historyReferencesPayload, isMathAnimatorMode, isQuizMode, isResearchMode, isVisualizeMode, mathAnimatorConfig, notebookReferencesPayload, questionNotebookReferencesPayload, quizConfig, quizPdf, researchConfig, selectedHistorySessions.length, selectedNotebookRecords.length, selectedQuestionEntries.length, selectedSkills, skillsAutoMode, sendMessage, shouldAutoScrollRef, state.activeCapability, state.isStreaming, visualizeConfig]);
+      quizConfig,
+      quizPdf,
+      researchConfig,
+      selectedHistorySessions.length,
+      selectedNotebookRecords.length,
+      selectedQuestionEntries.length,
+      selectedSkills,
+      skillsAutoMode,
+      sendMessage,
+      shouldAutoScrollRef,
+      state.activeCapability,
+      state.isStreaming,
+      visualizeConfig,
+    ],
+  );
 
   const handleConfirmOutline = useCallback(
-    (outline: OutlineItem[], _topic: string, originalConfig?: Record<string, unknown> | null) => {
+    (
+      outline: OutlineItem[],
+      _topic: string,
+      originalConfig?: Record<string, unknown> | null,
+    ) => {
       const config: Record<string, unknown> = {
-        ...(originalConfig ?? { mode: researchConfig.mode, depth: researchConfig.depth, sources: [...researchConfig.sources] }),
+        ...(originalConfig ?? {
+          mode: researchConfig.mode,
+          depth: researchConfig.depth,
+          sources: [...researchConfig.sources],
+        }),
         confirmed_outline: outline,
       };
-      sendMessage(_topic, [], config, undefined, undefined, { displayUserMessage: false, persistUserMessage: false });
+      sendMessage(_topic, [], config, undefined, undefined, {
+        displayUserMessage: false,
+        persistUserMessage: false,
+      });
       shouldAutoScrollRef.current = true;
     },
     [researchConfig, sendMessage, shouldAutoScrollRef],
@@ -653,18 +918,35 @@ export default function ChatPage() {
     regenerateLastMessage();
   }, [regenerateLastMessage]);
 
-  const handleSetKB = useCallback((kb: string) => { setKBs(kb ? [kb] : []); }, [setKBs]);
-  const handleSelectNotebookPicker = useCallback(() => { setShowNotebookPicker(true); }, []);
-  const handleSelectHistoryPicker = useCallback(() => { setShowHistoryPicker(true); }, []);
-  const handleSelectQuestionBankPicker = useCallback(() => { setShowQuestionBankPicker(true); }, []);
+  const handleSetKB = useCallback(
+    (kb: string) => {
+      setKBs(kb ? [kb] : []);
+    },
+    [setKBs],
+  );
+  const handleSelectNotebookPicker = useCallback(() => {
+    setShowNotebookPicker(true);
+  }, []);
+  const handleSelectHistoryPicker = useCallback(() => {
+    setShowHistoryPicker(true);
+  }, []);
+  const handleSelectQuestionBankPicker = useCallback(() => {
+    setShowQuestionBankPicker(true);
+  }, []);
   const handleRemoveHistory = useCallback((sessionId: string) => {
-    setSelectedHistorySessions((prev) => prev.filter((item) => item.sessionId !== sessionId));
+    setSelectedHistorySessions((prev) =>
+      prev.filter((item) => item.sessionId !== sessionId),
+    );
   }, []);
   const handleRemoveNotebook = useCallback((notebookId: string) => {
-    setSelectedNotebookRecords((prev) => prev.filter((record) => record.notebookId !== notebookId));
+    setSelectedNotebookRecords((prev) =>
+      prev.filter((record) => record.notebookId !== notebookId),
+    );
   }, []);
   const handleRemoveQuestion = useCallback((entryId: number) => {
-    setSelectedQuestionEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+    setSelectedQuestionEntries((prev) =>
+      prev.filter((entry) => entry.id !== entryId),
+    );
   }, []);
   const handleToggleSkill = useCallback((name: string) => {
     setSkillsAutoMode(false);
@@ -678,14 +960,39 @@ export default function ChatPage() {
     if (auto) setSelectedSkills([]);
   }, []);
 
-  const handleTogglePanelCollapsed = useCallback(() => { setPanelCollapsed((prev) => !prev); }, []);
-  const handleCloseNotebookPicker = useCallback(() => { setShowNotebookPicker(false); }, []);
-  const handleApplyNotebookRecords = useCallback((records: SelectedRecord[]) => { setSelectedNotebookRecords(records); }, []);
-  const handleCloseHistoryPicker = useCallback(() => { setShowHistoryPicker(false); }, []);
-  const handleApplyHistorySessions = useCallback((sessions: SelectedHistorySession[]) => { setSelectedHistorySessions(sessions); }, []);
-  const handleCloseQuestionBankPicker = useCallback(() => { setShowQuestionBankPicker(false); }, []);
-  const handleApplyQuestionEntries = useCallback((entries: SelectedQuestionEntry[]) => { setSelectedQuestionEntries(entries); }, []);
-  const handleCloseSaveModal = useCallback(() => { setShowSaveModal(false); }, []);
+  const handleTogglePanelCollapsed = useCallback(() => {
+    setPanelCollapsed((prev) => !prev);
+  }, []);
+  const handleCloseNotebookPicker = useCallback(() => {
+    setShowNotebookPicker(false);
+  }, []);
+  const handleApplyNotebookRecords = useCallback(
+    (records: SelectedRecord[]) => {
+      setSelectedNotebookRecords(records);
+    },
+    [],
+  );
+  const handleCloseHistoryPicker = useCallback(() => {
+    setShowHistoryPicker(false);
+  }, []);
+  const handleApplyHistorySessions = useCallback(
+    (sessions: SelectedHistorySession[]) => {
+      setSelectedHistorySessions(sessions);
+    },
+    [],
+  );
+  const handleCloseQuestionBankPicker = useCallback(() => {
+    setShowQuestionBankPicker(false);
+  }, []);
+  const handleApplyQuestionEntries = useCallback(
+    (entries: SelectedQuestionEntry[]) => {
+      setSelectedQuestionEntries(entries);
+    },
+    [],
+  );
+  const handleCloseSaveModal = useCallback(() => {
+    setShowSaveModal(false);
+  }, []);
 
   const handleNewChat = useCallback(() => {
     router.push("/chat");
@@ -694,7 +1001,9 @@ export default function ChatPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[var(--background)]">
       <div className="mx-auto flex w-full max-w-[960px] items-center justify-between px-6 pt-3 pb-0">
-        <span className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">{t(activeCap.label)}</span>
+        <span className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">
+          {t(activeCap.label)}
+        </span>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowSaveModal(true)}
@@ -712,7 +1021,6 @@ export default function ChatPage() {
         </div>
       </div>
       <div className="mx-auto flex w-full max-w-[960px] flex-1 min-h-0 flex-col overflow-hidden px-6">
-
         {!hasMessages ? (
           <div className="flex flex-1 min-h-0 flex-col items-center justify-center animate-fade-in">
             <div className="text-center">
@@ -776,6 +1084,7 @@ export default function ChatPage() {
           skillMenuOpen={skillMenuOpen}
           hasMessages={hasMessages}
           attachments={attachments}
+          attachmentError={attachmentError}
           activeCap={activeCap}
           visibleTools={visibleTools}
           selectedTools={selectedTools}
@@ -825,6 +1134,7 @@ export default function ChatPage() {
           onDragOver={handleDragOver}
           onDrop={handleDrop}
           onPaste={handlePaste}
+          onAddFiles={handleAddFiles}
           onSelectCapability={handleSelectCapability}
           onCancelStreaming={cancelStreamingTurn}
           onChangeQuizConfig={setQuizConfig}

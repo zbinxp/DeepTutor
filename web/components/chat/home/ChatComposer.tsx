@@ -1,7 +1,15 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import Image from "next/image";
 import {
   ArrowUp,
@@ -9,7 +17,6 @@ import {
   BookOpen,
   ChevronDown,
   ClipboardList,
-  FilePlus2,
   Layers,
   MessageSquare,
   Paperclip,
@@ -19,6 +26,11 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import {
+  ATTACHMENT_ACCEPT,
+  docIconFor,
+  formatBytes,
+} from "@/lib/doc-attachments";
 import { useTranslation } from "react-i18next";
 import type { SelectedHistorySession } from "@/components/chat/HistorySessionPicker";
 import type { SelectedQuestionEntry } from "@/components/chat/QuestionBankPicker";
@@ -26,13 +38,19 @@ import type { SelectedRecord } from "@/lib/notebook-selection-types";
 import type { DeepQuestionFormConfig } from "@/lib/quiz-types";
 import type { MathAnimatorFormConfig } from "@/lib/math-animator-types";
 import type { VisualizeFormConfig } from "@/lib/visualize-types";
-import type { DeepResearchFormConfig, ResearchSource } from "@/lib/research-types";
+import type {
+  DeepResearchFormConfig,
+  ResearchSource,
+} from "@/lib/research-types";
 import { ReferenceChips } from "./ChatMessages";
 import { ComposerInput, type ComposerInputHandle } from "./ComposerInput";
 
-const QuizConfigPanel = dynamic(() => import("@/components/quiz/QuizConfigPanel"), {
-  ssr: false,
-});
+const QuizConfigPanel = dynamic(
+  () => import("@/components/quiz/QuizConfigPanel"),
+  {
+    ssr: false,
+  },
+);
 const MathAnimatorConfigPanel = dynamic(
   () => import("@/components/math-animator/MathAnimatorConfigPanel"),
   { ssr: false },
@@ -51,6 +69,8 @@ interface PendingAttachment {
   filename: string;
   base64?: string;
   previewUrl?: string;
+  size?: number;
+  mimeType?: string;
 }
 
 interface KnowledgeBase {
@@ -95,6 +115,7 @@ export default memo(function ChatComposer({
   skillMenuOpen,
   hasMessages,
   attachments,
+  attachmentError,
   activeCap,
   visibleTools,
   selectedTools,
@@ -144,6 +165,7 @@ export default memo(function ChatComposer({
   onDragOver,
   onDrop,
   onPaste,
+  onAddFiles,
   onSelectCapability,
   onCancelStreaming,
   onChangeQuizConfig,
@@ -170,6 +192,7 @@ export default memo(function ChatComposer({
   skillMenuOpen: boolean;
   hasMessages: boolean;
   attachments: PendingAttachment[];
+  attachmentError: string | null;
   activeCap: CapabilityDef;
   visibleTools: ToolDef[];
   selectedTools: Set<string>;
@@ -178,7 +201,11 @@ export default memo(function ChatComposer({
   selectedNotebookRecords: SelectedRecord[];
   selectedHistorySessions: SelectedHistorySession[];
   selectedQuestionEntries: SelectedQuestionEntry[];
-  notebookReferenceGroups: Array<{ notebookId: string; notebookName: string; count: number }>;
+  notebookReferenceGroups: Array<{
+    notebookId: string;
+    notebookName: string;
+    count: number;
+  }>;
   availableSkills: Array<{ name: string; description: string }>;
   selectedSkills: string[];
   skillsAutoMode: boolean;
@@ -219,6 +246,7 @@ export default memo(function ChatComposer({
   onDragOver: (event: React.DragEvent) => void;
   onDrop: (event: React.DragEvent) => void;
   onPaste: (event: React.ClipboardEvent) => void;
+  onAddFiles: (files: File[]) => void;
   onSelectCapability: (value: string) => void;
   onCancelStreaming: () => void;
   onChangeQuizConfig: (next: DeepQuestionFormConfig) => void;
@@ -234,6 +262,21 @@ export default memo(function ChatComposer({
   const [hasContent, setHasContent] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputHandleRef = useRef<ComposerInputHandle>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handlePickFiles = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const picked = Array.from(event.target.files ?? []);
+      if (picked.length) onAddFiles(picked);
+      // Reset so picking the same file twice still triggers `change`.
+      event.target.value = "";
+    },
+    [onAddFiles],
+  );
 
   const activeCapabilityKey = activeCap.value || "chat";
 
@@ -249,11 +292,14 @@ export default memo(function ChatComposer({
     setHasContent((prev) => (prev === next ? prev : next));
   }, []);
 
-  const doSend = useCallback((content: string) => {
-    onSend(content);
-    setHasContent(false);
-    inputHandleRef.current?.clear();
-  }, [onSend]);
+  const doSend = useCallback(
+    (content: string) => {
+      onSend(content);
+      setHasContent(false);
+      inputHandleRef.current?.clear();
+    },
+    [onSend],
+  );
 
   const hasReferences =
     !!attachments.length ||
@@ -296,7 +342,9 @@ export default memo(function ChatComposer({
                     key={cap.value}
                     onClick={() => onSelectCapability(cap.value)}
                     className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors ${
-                      selected ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]/50"
+                      selected
+                        ? "bg-[var(--muted)]"
+                        : "hover:bg-[var(--muted)]/50"
                     }`}
                   >
                     <Icon
@@ -305,10 +353,16 @@ export default memo(function ChatComposer({
                       className={`shrink-0 ${selected ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-medium text-[var(--foreground)]">{t(cap.label)}</div>
-                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">{t(cap.description)}</div>
+                      <div className="text-[13px] font-medium text-[var(--foreground)]">
+                        {t(cap.label)}
+                      </div>
+                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">
+                        {t(cap.description)}
+                      </div>
                     </div>
-                    {selected && <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--primary)]" />}
+                    {selected && (
+                      <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--primary)]" />
+                    )}
                   </button>
                 );
               })}
@@ -332,12 +386,28 @@ export default memo(function ChatComposer({
         >
           {dragging && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-[var(--primary)]/50 bg-[var(--primary)]/[0.04]">
-              <div className="flex flex-col items-center gap-1.5 text-[var(--primary)]">
+              <div className="flex flex-col items-center gap-1 text-[var(--primary)]">
                 <Paperclip size={22} strokeWidth={1.6} />
-                <span className="text-[13px] font-medium">{t("Drop images here")}</span>
+                <span className="text-[13px] font-medium">
+                  {t("Drop files here")}
+                </span>
+                <span className="text-[11px] text-[var(--primary)]/70">
+                  {t("Images, PDF, DOCX, XLSX, PPTX")}
+                </span>
               </div>
             </div>
           )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={ATTACHMENT_ACCEPT}
+            onChange={handleFileInputChange}
+            className="hidden"
+            aria-hidden="true"
+            tabIndex={-1}
+          />
 
           {hasReferences && (
             <div className="px-4 pt-3.5 [&>div]:mb-0">
@@ -368,40 +438,78 @@ export default memo(function ChatComposer({
 
           {!!attachments.length && (
             <div className="flex flex-wrap gap-2 px-4 pb-2">
-              {attachments.map((a, i) => (
-                <div key={`${a.filename}-${i}`} className="group relative">
-                  {a.type === "image" && a.previewUrl ? (
-                    <div className="relative h-16 w-16 overflow-hidden rounded-lg border border-[var(--border)]">
-                      <Image
-                        src={a.previewUrl}
-                        alt={a.filename || t("Attachment preview")}
-                        fill
-                        unoptimized
-                        className="object-cover"
-                      />
-                      <button
-                        onClick={() => onRemoveAttachment(i)}
-                        className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--foreground)] text-[var(--background)] opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
-                      >
-                        <X size={10} />
-                      </button>
+              {attachments.map((a, i) => {
+                if (a.type === "image" && a.previewUrl) {
+                  return (
+                    <div
+                      key={`${a.filename}-${i}`}
+                      className="group relative"
+                    >
+                      <div className="relative h-16 w-16 overflow-hidden rounded-lg border border-[var(--border)]">
+                        <Image
+                          src={a.previewUrl}
+                          alt={a.filename || t("Attachment preview")}
+                          fill
+                          unoptimized
+                          className="object-cover"
+                        />
+                        <button
+                          onClick={() => onRemoveAttachment(i)}
+                          className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--foreground)] text-[var(--background)] opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
                     </div>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 rounded-md bg-[var(--muted)] px-2 py-0.5 text-[11px] text-[var(--muted-foreground)]">
-                      <FilePlus2 size={10} /> {a.filename}
-                      <button onClick={() => onRemoveAttachment(i)} className="ml-0.5 opacity-60 hover:opacity-100">
-                        <X size={10} />
-                      </button>
-                    </span>
-                  )}
-                </div>
-              ))}
+                  );
+                }
+                const spec = docIconFor(a.filename);
+                const Icon = spec.Icon;
+                const sizeLabel = a.size ? formatBytes(a.size) : "";
+                return (
+                  <div
+                    key={`${a.filename}-${i}`}
+                    className="group relative"
+                    title={a.filename}
+                  >
+                    <div className="flex h-16 w-[160px] items-center gap-2.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-2.5">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[var(--muted)]/60">
+                        <Icon
+                          size={22}
+                          strokeWidth={1.5}
+                          className={spec.tint}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-medium text-[var(--foreground)]">
+                          {a.filename}
+                        </div>
+                        <div className="truncate text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">
+                          {sizeLabel ? `${spec.label} · ${sizeLabel}` : spec.label}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => onRemoveAttachment(i)}
+                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--foreground)] text-[var(--background)] opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {attachmentError && (
+            <div className="px-4 pb-2 text-[11px] text-red-600">
+              {attachmentError}
             </div>
           )}
 
           <div className="border-t border-[var(--border)]/35 px-3 py-2">
             <div className="flex items-center gap-2">
-                <button
+              <button
                 ref={capBtnRef}
                 onClick={() => onSetCapMenuOpen((v) => !v)}
                 className={`inline-flex shrink-0 items-center gap-1.5 py-1.5 px-1 text-[12px] transition-colors ${
@@ -412,7 +520,10 @@ export default memo(function ChatComposer({
               >
                 <CapIcon size={14} strokeWidth={1.6} />
                 <span className="font-medium">{t(activeCap.label)}</span>
-                <ChevronDown size={11} className={`transition-transform ${capMenuOpen ? "rotate-180" : ""}`} />
+                <ChevronDown
+                  size={11}
+                  className={`transition-transform ${capMenuOpen ? "rotate-180" : ""}`}
+                />
               </button>
 
               <div className="h-3.5 w-px bg-[var(--border)]/30" />
@@ -427,15 +538,27 @@ export default memo(function ChatComposer({
                     >
                       <Layers size={12} strokeWidth={1.7} />
                       {t("Sources")}
-                      <ChevronDown size={10} className={`transition-transform ${toolMenuOpen ? "rotate-180" : ""}`} />
+                      <ChevronDown
+                        size={10}
+                        className={`transition-transform ${toolMenuOpen ? "rotate-180" : ""}`}
+                      />
                     </button>
                     {researchConfig.sources.length > 0 && (
                       <div className="flex items-center gap-[3px] overflow-hidden">
                         {researchSources
-                          .filter((rs) => researchConfig.sources.includes(rs.name))
+                          .filter((rs) =>
+                            researchConfig.sources.includes(rs.name),
+                          )
                           .map((rs, i) => (
-                            <span key={rs.name} className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35">
-                              {i > 0 && <span className="text-[12px] leading-none">·</span>}
+                            <span
+                              key={rs.name}
+                              className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35"
+                            >
+                              {i > 0 && (
+                                <span className="text-[12px] leading-none">
+                                  ·
+                                </span>
+                              )}
                               {t(rs.label)}
                             </span>
                           ))}
@@ -447,12 +570,16 @@ export default memo(function ChatComposer({
                         className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-lg"
                       >
                         {researchSources.map((source) => {
-                          const active = researchConfig.sources.includes(source.name);
+                          const active = researchConfig.sources.includes(
+                            source.name,
+                          );
                           const Icon = source.icon;
                           return (
                             <button
                               key={source.name}
-                              onClick={() => onToggleResearchSource(source.name)}
+                              onClick={() =>
+                                onToggleResearchSource(source.name)
+                              }
                               className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] transition-colors ${
                                 active
                                   ? "text-[var(--primary)]"
@@ -460,8 +587,12 @@ export default memo(function ChatComposer({
                               } hover:bg-[var(--muted)]/40`}
                             >
                               <Icon size={13} strokeWidth={1.7} />
-                              <span className="flex-1 font-medium">{t(source.label)}</span>
-                              {active && <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />}
+                              <span className="flex-1 font-medium">
+                                {t(source.label)}
+                              </span>
+                              {active && (
+                                <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />
+                              )}
                             </button>
                           );
                         })}
@@ -477,16 +608,28 @@ export default memo(function ChatComposer({
                     >
                       <Sparkles size={12} strokeWidth={1.7} />
                       {t("Tools")}
-                      <ChevronDown size={10} className={`transition-transform ${toolMenuOpen ? "rotate-180" : ""}`} />
+                      <ChevronDown
+                        size={10}
+                        className={`transition-transform ${toolMenuOpen ? "rotate-180" : ""}`}
+                      />
                     </button>
                     {selectedTools.size > 0 && (
                       <div className="flex items-center gap-[3px] overflow-hidden">
-                        {visibleTools.filter((vt) => selectedTools.has(vt.name)).map((vt, i) => (
-                          <span key={vt.name} className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35">
-                            {i > 0 && <span className="text-[12px] leading-none">·</span>}
-                            {t(vt.label)}
-                          </span>
-                        ))}
+                        {visibleTools
+                          .filter((vt) => selectedTools.has(vt.name))
+                          .map((vt, i) => (
+                            <span
+                              key={vt.name}
+                              className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35"
+                            >
+                              {i > 0 && (
+                                <span className="text-[12px] leading-none">
+                                  ·
+                                </span>
+                              )}
+                              {t(vt.label)}
+                            </span>
+                          ))}
                       </div>
                     )}
                     {toolMenuOpen && (
@@ -508,8 +651,12 @@ export default memo(function ChatComposer({
                               } hover:bg-[var(--muted)]/40`}
                             >
                               <Icon size={13} strokeWidth={1.7} />
-                              <span className="flex-1 font-medium">{t(tool.label)}</span>
-                              {active && <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />}
+                              <span className="flex-1 font-medium">
+                                {t(tool.label)}
+                              </span>
+                              {active && (
+                                <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />
+                              )}
                             </button>
                           );
                         })}
@@ -517,6 +664,17 @@ export default memo(function ChatComposer({
                     )}
                   </div>
                 ) : null}
+
+                <button
+                  type="button"
+                  onClick={handlePickFiles}
+                  title={t("Attach files")}
+                  aria-label={t("Attach files")}
+                  className="inline-flex shrink-0 items-center gap-1 py-1 px-1.5 text-[11px] font-medium text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
+                >
+                  <Paperclip size={12} strokeWidth={1.7} />
+                  {t("Attach")}
+                </button>
 
                 <div className="relative flex items-center gap-0.5">
                   <button
@@ -526,7 +684,10 @@ export default memo(function ChatComposer({
                   >
                     <AtSign size={12} strokeWidth={1.7} />
                     {t("Reference")}
-                    <ChevronDown size={10} className={`transition-transform ${refMenuOpen ? "rotate-180" : ""}`} />
+                    <ChevronDown
+                      size={10}
+                      className={`transition-transform ${refMenuOpen ? "rotate-180" : ""}`}
+                    />
                   </button>
                   {(selectedNotebookRecords.length > 0 ||
                     selectedHistorySessions.length > 0 ||
@@ -550,9 +711,13 @@ export default memo(function ChatComposer({
                         className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] hover:bg-[var(--muted)]/40"
                       >
                         <BookOpen size={13} strokeWidth={1.7} />
-                        <span className="flex-1 font-medium">{t("Notebook")}</span>
+                        <span className="flex-1 font-medium">
+                          {t("Notebook")}
+                        </span>
                         {selectedNotebookRecords.length > 0 && (
-                          <span className="text-[10px] text-[var(--primary)]">{selectedNotebookRecords.length}</span>
+                          <span className="text-[10px] text-[var(--primary)]">
+                            {selectedNotebookRecords.length}
+                          </span>
                         )}
                       </button>
                       <button
@@ -563,9 +728,13 @@ export default memo(function ChatComposer({
                         className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] hover:bg-[var(--muted)]/40"
                       >
                         <MessageSquare size={13} strokeWidth={1.7} />
-                        <span className="flex-1 font-medium">{t("Chat History")}</span>
+                        <span className="flex-1 font-medium">
+                          {t("Chat History")}
+                        </span>
                         {selectedHistorySessions.length > 0 && (
-                          <span className="text-[10px] text-[var(--primary)]">{selectedHistorySessions.length}</span>
+                          <span className="text-[10px] text-[var(--primary)]">
+                            {selectedHistorySessions.length}
+                          </span>
                         )}
                       </button>
                       <button
@@ -576,9 +745,13 @@ export default memo(function ChatComposer({
                         className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] hover:bg-[var(--muted)]/40"
                       >
                         <ClipboardList size={13} strokeWidth={1.7} />
-                        <span className="flex-1 font-medium">{t("Question Bank")}</span>
+                        <span className="flex-1 font-medium">
+                          {t("Question Bank")}
+                        </span>
                         {selectedQuestionEntries.length > 0 && (
-                          <span className="text-[10px] text-[var(--primary)]">{selectedQuestionEntries.length}</span>
+                          <span className="text-[10px] text-[var(--primary)]">
+                            {selectedQuestionEntries.length}
+                          </span>
                         )}
                       </button>
                     </div>
@@ -594,16 +767,28 @@ export default memo(function ChatComposer({
                     >
                       <Wand2 size={12} strokeWidth={1.7} />
                       {t("Skills")}
-                      <ChevronDown size={10} className={`transition-transform ${skillMenuOpen ? "rotate-180" : ""}`} />
+                      <ChevronDown
+                        size={10}
+                        className={`transition-transform ${skillMenuOpen ? "rotate-180" : ""}`}
+                      />
                     </button>
                     {(skillsAutoMode || selectedSkills.length > 0) && (
                       <div className="flex items-center gap-[3px] overflow-hidden">
                         {skillsAutoMode ? (
-                          <span className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35">{t("Auto")}</span>
+                          <span className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35">
+                            {t("Auto")}
+                          </span>
                         ) : (
                           selectedSkills.map((name, i) => (
-                            <span key={name} className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35">
-                              {i > 0 && <span className="text-[12px] leading-none">·</span>}
+                            <span
+                              key={name}
+                              className="shrink-0 text-[10px] text-[var(--muted-foreground)]/35"
+                            >
+                              {i > 0 && (
+                                <span className="text-[12px] leading-none">
+                                  ·
+                                </span>
+                              )}
                               {name}
                             </span>
                           ))
@@ -624,8 +809,12 @@ export default memo(function ChatComposer({
                           } hover:bg-[var(--muted)]/40`}
                         >
                           <Sparkles size={13} strokeWidth={1.7} />
-                          <span className="flex-1 font-medium">{t("Auto")}</span>
-                          {skillsAutoMode && <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />}
+                          <span className="flex-1 font-medium">
+                            {t("Auto")}
+                          </span>
+                          {skillsAutoMode && (
+                            <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />
+                          )}
                         </button>
                         {availableSkills.length > 0 && (
                           <div className="my-1 h-px bg-[var(--border)]/40" />
@@ -644,8 +833,12 @@ export default memo(function ChatComposer({
                               } hover:bg-[var(--muted)]/40`}
                             >
                               <Wand2 size={13} strokeWidth={1.7} />
-                              <span className="flex-1 truncate font-medium">{skill.name}</span>
-                              {active && <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />}
+                              <span className="flex-1 truncate font-medium">
+                                {skill.name}
+                              </span>
+                              {active && (
+                                <div className="h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />
+                              )}
                             </button>
                           );
                         })}
@@ -665,17 +858,29 @@ export default memo(function ChatComposer({
                   value={stateKnowledgeBase}
                   onChange={(e) => onSetKB(e.target.value)}
                   disabled={!ragActive}
-                  title={ragActive ? t("Select Knowledge Base") : t("Enable Knowledge Base source first")}
+                  title={
+                    ragActive
+                      ? t("Select Knowledge Base")
+                      : t("Enable Knowledge Base source first")
+                  }
                   className={`h-[28px] appearance-none rounded-full border bg-transparent py-0 pl-2.5 pr-5 text-[11px] outline-none transition-colors ${
                     ragActive
                       ? "cursor-pointer border-[var(--border)]/40 text-[var(--muted-foreground)] hover:border-[var(--border)] hover:text-[var(--foreground)]"
                       : "cursor-not-allowed border-transparent text-[var(--border)]"
                   }`}
-                  style={{ backgroundImage: ragActive ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")" : "none", backgroundRepeat: "no-repeat", backgroundPosition: "right 6px center" }}
+                  style={{
+                    backgroundImage: ragActive
+                      ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")"
+                      : "none",
+                    backgroundRepeat: "no-repeat",
+                    backgroundPosition: "right 6px center",
+                  }}
                 >
                   <option value="">{ragActive ? t("No KB") : "—"}</option>
                   {knowledgeBases.map((kb) => (
-                    <option key={kb.name} value={kb.name}>{kb.name}</option>
+                    <option key={kb.name} value={kb.name}>
+                      {kb.name}
+                    </option>
                   ))}
                 </select>
 
@@ -691,9 +896,7 @@ export default memo(function ChatComposer({
                         streaming, signalling "still working — click to
                         cancel". The white square sits front-and-center so
                         the click target is always obvious. */}
-                    <span
-                      className="pointer-events-none absolute inset-0 rounded-full border-[1.5px] border-white/30 border-t-white/85 animate-spin opacity-90 transition-opacity group-hover:opacity-40"
-                    />
+                    <span className="pointer-events-none absolute inset-0 rounded-full border-[1.5px] border-white/30 border-t-white/85 animate-spin opacity-90 transition-opacity group-hover:opacity-40" />
                     <Square
                       size={9}
                       strokeWidth={2.6}
@@ -715,7 +918,10 @@ export default memo(function ChatComposer({
             </div>
           </div>
 
-          {(isQuizMode || isMathAnimatorMode || isVisualizeMode || isResearchMode) && (
+          {(isQuizMode ||
+            isMathAnimatorMode ||
+            isVisualizeMode ||
+            isResearchMode) && (
             <div className="border-t border-[var(--border)]/15">
               {isQuizMode ? (
                 <QuizConfigPanel
